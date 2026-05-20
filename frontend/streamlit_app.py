@@ -1,182 +1,221 @@
-# streamlit_app.py - Frontend for the RAG Chatbot.
-#
-# Talks to the FastAPI backend via HTTP.
-# Make sure the backend is running before starting this:
-#   uvicorn app.main:app --reload
-#
-# Run with:
-#   streamlit run frontend/streamlit_app.py
-
 import streamlit as st
 import requests
 
-# ── Config ────────────────────────────────────────────────────────────────────
-API_BASE = "http://localhost:8000"
+# Read API_BASE from Streamlit secrets if available (production),
+# otherwise fall back to localhost (local dev)
+try:
+    API_BASE = st.secrets["API_BASE"]
+except Exception:
+    API_BASE = "http://localhost:8000"
+
+st.set_page_config(page_title="RAG Chatbot", page_icon="🤖", layout="wide")
 
 
-# ── Page setup ────────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="RAG Chatbot",
-    page_icon="🤖",
-    layout="wide",
-)
-
-st.title("🤖 RAG Chatbot")
-st.caption("Ask questions about your uploaded documents — powered by Google Gemini")
+def api_headers():
+    token = st.session_state.get("token")
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 
-# ── Helper ────────────────────────────────────────────────────────────────────
 def render_sources(sources: list[dict]):
-    """Render source documents in a collapsible expander."""
     if not sources:
         return
     with st.expander("📚 Sources", expanded=False):
         for src in sources:
             st.markdown(
-                f"- **{src['file_name']}** | "
-                f"Page {src['page_number']} | "
-                f"Score `{src['score']:.4f}`"
+                f"- **{src['file_name']}** | Page {src['page_number']} | Score `{src['score']:.4f}`"
             )
 
 
-# ── Sidebar — Document Management ─────────────────────────────────────────────
-with st.sidebar:
-    st.header("📁 Documents")
+def login_page():
+    st.title("🤖 RAG Chatbot")
+    tab1, tab2 = st.tabs(["Login", "Register"])
 
-    # ── Upload ────────────────────────────────────────────────────────────────
-    st.subheader("Upload a Document")
-    uploaded_file = st.file_uploader(
-        "Choose a file",
-        type=["pdf", "txt", "md"],
-        help="Supported formats: PDF, TXT, Markdown",
-    )
+    with tab1:
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login", use_container_width=True)
 
-    if uploaded_file is not None:
-        if st.button("📤 Ingest Document", use_container_width=True):
+        if submitted:
+            try:
+                res = requests.post(
+                    f"{API_BASE}/auth/login",
+                    json={"username": username, "password": password},
+                )
+                if res.status_code == 200:
+                    st.session_state.token    = res.json()["access_token"]
+                    st.session_state.username = username
+                    st.session_state.messages = []
+                    _load_history()
+                    st.rerun()
+                else:
+                    st.error(res.json().get("detail", "Login failed."))
+            except requests.exceptions.ConnectionError:
+                st.error("Cannot connect to API. Is the backend running?")
+
+    with tab2:
+        with st.form("register_form"):
+            new_username = st.text_input("Choose a username")
+            new_password = st.text_input("Choose a password", type="password")
+            submitted = st.form_submit_button("Register", use_container_width=True)
+
+        if submitted:
+            try:
+                res = requests.post(
+                    f"{API_BASE}/auth/register",
+                    json={"username": new_username, "password": new_password},
+                )
+                if res.status_code == 201:
+                    st.session_state.token    = res.json()["access_token"]
+                    st.session_state.username = new_username
+                    st.session_state.messages = []
+                    st.rerun()
+                else:
+                    st.error(res.json().get("detail", "Registration failed."))
+            except requests.exceptions.ConnectionError:
+                st.error("Cannot connect to API. Is the backend running?")
+
+
+def _load_history():
+    try:
+        res = requests.get(f"{API_BASE}/chat/history", headers=api_headers())
+        if res.status_code == 200:
+            for msg in res.json().get("history", []):
+                st.session_state.messages.append({
+                    "role":    msg["role"],
+                    "content": msg["message"],
+                })
+    except Exception:
+        pass
+
+
+def main_app():
+    with st.sidebar:
+        st.markdown(f"👤 **{st.session_state.get('username', '')}**")
+        if st.button("Logout", use_container_width=True):
+            for key in ["token", "username", "messages"]:
+                st.session_state.pop(key, None)
+            st.rerun()
+
+        st.divider()
+        st.header("📁 Documents")
+
+        st.subheader("Upload")
+        uploaded_file = st.file_uploader("Choose a file", type=["pdf", "txt", "md"])
+        if uploaded_file and st.button("📤 Ingest", use_container_width=True):
             with st.spinner(f"Ingesting {uploaded_file.name}..."):
                 try:
-                    response = requests.post(
+                    res = requests.post(
                         f"{API_BASE}/documents/upload",
                         files={"file": (uploaded_file.name, uploaded_file.getvalue())},
+                        headers=api_headers(),
                     )
-                    if response.status_code == 200:
-                        data = response.json()
-                        st.success(
-                            f"✓ **{data['file_name']}** ingested\n\n"
-                            f"- Pages loaded: {data['pages_loaded']}\n"
-                            f"- Chunks stored: {data['chunks_stored']}\n"
-                            f"- Total chunks in DB: {data['total_chunks']}"
-                        )
-                    else:
-                        st.error(f"Error: {response.json().get('detail', 'Unknown error')}")
-                except requests.exceptions.ConnectionError:
-                    st.error("Cannot connect to API. Is the backend running?")
-
-    st.divider()
-
-    # ── Uploaded files list ───────────────────────────────────────────────────
-    st.subheader("Uploaded Files")
-
-    if st.button("🔄 Refresh", use_container_width=True):
-        st.rerun()
-
-    try:
-        response = requests.get(f"{API_BASE}/documents")
-        if response.status_code == 200:
-            data = response.json()
-            if data["total"] == 0:
-                st.info("No documents uploaded yet.")
-            else:
-                for f in data["files"]:
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        st.text(f"📄 {f['file_name']}")
-                        st.caption(f"{f['size_kb']} KB")
-                    with col2:
-                        if st.button("🗑", key=f"del_{f['file_name']}", help="Delete file"):
-                            del_response = requests.delete(
-                                f"{API_BASE}/documents/{f['file_name']}"
+                    if res.status_code == 200:
+                        d = res.json()
+                        if d.get("skipped"):
+                            st.warning(d.get("reason", "Already ingested."))
+                        else:
+                            st.success(
+                                f"✓ **{d['file_name']}**\n\n"
+                                f"- Pages: {d['pages_loaded']}\n"
+                                f"- Chunks: {d['chunks_stored']}\n"
+                                f"- Total in DB: {d['total_chunks']}"
                             )
-                            if del_response.status_code == 200:
-                                st.success(f"Deleted {f['file_name']}")
-                                st.rerun()
-                            else:
-                                st.error("Delete failed.")
-    except requests.exceptions.ConnectionError:
-        st.warning("Cannot reach API.")
+                    else:
+                        st.error(res.json().get("detail", "Upload failed."))
+                except requests.exceptions.ConnectionError:
+                    st.error("Cannot connect to API.")
 
-    st.divider()
+        st.divider()
+        st.subheader("Your Files")
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.rerun()
 
-    # ── Health check ──────────────────────────────────────────────────────────
-    st.subheader("System Status")
-    try:
-        response = requests.get(f"{API_BASE}/health")
-        if response.status_code == 200:
-            info = response.json()
-            st.success("✓ API online")
-            st.metric("Chunks in DB", info["total_chunks"])
-        else:
-            st.error("API returned an error.")
-    except requests.exceptions.ConnectionError:
-        st.error("✗ API offline")
-
-
-# ── Main — Chat Interface ──────────────────────────────────────────────────────
-
-# Initialise chat history in session state
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# Render existing chat history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        if message["role"] == "assistant" and message.get("sources"):
-            render_sources(message["sources"])
-
-# Chat input
-if prompt := st.chat_input("Ask a question about your documents..."):
-
-    # Show user message
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    # Call API and show response
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            try:
-                response = requests.post(
-                    f"{API_BASE}/chat",
-                    json={"question": prompt},
-                )
-
-                if response.status_code == 200:
-                    data    = response.json()
-                    answer  = data["answer"]
-                    sources = data["sources"]
-
-                    st.markdown(answer)
-                    render_sources(sources)
-
-                    st.session_state.messages.append({
-                        "role":    "assistant",
-                        "content": answer,
-                        "sources": sources,
-                    })
-
-                elif response.status_code == 404:
-                    msg = "⚠️ No documents found. Please upload a document first."
-                    st.warning(msg)
-                    st.session_state.messages.append({"role": "assistant", "content": msg})
-
+        try:
+            res = requests.get(f"{API_BASE}/documents", headers=api_headers())
+            if res.status_code == 200:
+                data = res.json()
+                if data["total"] == 0:
+                    st.info("No documents uploaded yet.")
                 else:
-                    detail = response.json().get("detail", "Unknown error")
-                    msg = f"❌ Error: {detail}"
+                    for f in data["files"]:
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.text(f"📄 {f['file_name']}")
+                        with col2:
+                            if st.button("🗑", key=f"del_{f['file_name']}"):
+                                requests.delete(
+                                    f"{API_BASE}/documents/{f['file_name']}",
+                                    headers=api_headers(),
+                                )
+                                st.rerun()
+        except requests.exceptions.ConnectionError:
+            st.warning("Cannot reach API.")
+
+        st.divider()
+        st.subheader("Status")
+        try:
+            res = requests.get(f"{API_BASE}/health")
+            if res.status_code == 200:
+                st.success("✓ API online")
+        except Exception:
+            st.error("✗ API offline")
+
+    st.title("🤖 RAG Chatbot")
+    st.caption("Ask questions about your documents — powered by Google Gemini")
+
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            if message["role"] == "assistant" and message.get("sources"):
+                render_sources(message["sources"])
+
+    if prompt := st.chat_input("Ask a question about your documents..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                try:
+                    res = requests.post(
+                        f"{API_BASE}/chat",
+                        json={"question": prompt},
+                        headers=api_headers(),
+                    )
+                    if res.status_code == 200:
+                        data    = res.json()
+                        answer  = data["answer"]
+                        sources = data["sources"]
+                        st.markdown(answer)
+                        render_sources(sources)
+                        st.session_state.messages.append({
+                            "role":    "assistant",
+                            "content": answer,
+                            "sources": sources,
+                        })
+                    elif res.status_code == 401:
+                        st.warning("Session expired. Please log in again.")
+                        st.session_state.pop("token", None)
+                        st.rerun()
+                    elif res.status_code == 404:
+                        msg = "⚠️ No documents found. Please upload a document first."
+                        st.warning(msg)
+                        st.session_state.messages.append({"role": "assistant", "content": msg})
+                    else:
+                        msg = f"❌ {res.json().get('detail', 'Unknown error')}"
+                        st.error(msg)
+                        st.session_state.messages.append({"role": "assistant", "content": msg})
+                except requests.exceptions.ConnectionError:
+                    msg = "❌ Cannot connect to API."
                     st.error(msg)
                     st.session_state.messages.append({"role": "assistant", "content": msg})
 
-            except requests.exceptions.ConnectionError:
-                msg = "❌ Cannot connect to API. Make sure the backend is running."
-                st.error(msg)
-                st.session_state.messages.append({"role": "assistant", "content": msg})
+
+if "token" not in st.session_state:
+    login_page()
+else:
+    main_app()

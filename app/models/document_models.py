@@ -8,6 +8,8 @@ class IngestResponse(BaseModel):
     pages_loaded:  int
     chunks_stored: int
     total_chunks:  int
+    skipped:       bool = False
+    reason:        str  = ""
 
 
 class FileInfo(BaseModel):

@@ -13,8 +13,19 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "models/gemini-embedding-001"
     CHAT_MODEL: str = "gemini-2.5-flash"
 
-    # ── Vector store ──────────────────────────────────────────────────────────
-    VECTOR_DB_PATH: str = "./data/chroma_db"
+    # ── Vector store 
+    VECTOR_DB_PATH: str = "./data/chroma_db"  
+    QDRANT_URL: str = ""                        
+    QDRANT_API_KEY: str = ""                    
+
+    # ── Database — 
+    SUPABASE_URL: str = ""                    
+    SUPABASE_KEY: str = ""                     
+
+    # ── Auth — JWT (Phase 4) ──────────────────────────────────────────────────
+    JWT_SECRET: str = "change-this-secret"      # set a strong secret in .env
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRE_MINUTES: int = 60 * 24           # 24 hours
 
     # ── Text splitting ────────────────────────────────────────────────────────
     CHUNK_SIZE: int = 800
@@ -22,6 +33,9 @@ class Settings(BaseSettings):
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
     TOP_K_RESULTS: int = 4
+
+    # ── Chat memory (Phase 6) ─────────────────────────────────────────────────
+    CHAT_HISTORY_LIMIT: int = 10                # last N messages passed to Gemini
 
     class Config:
         env_file = ".env"

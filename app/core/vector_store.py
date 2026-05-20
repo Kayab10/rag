@@ -1,165 +1,109 @@
-# vector_store.py - Stores and searches vector embeddings using ChromaDB.
-#
-# ChromaDB is a local, file-based vector database — no server needed.
-# All data is persisted to VECTOR_DB_PATH (configured in config.py / .env).
-#
-# Stored item shape:
-#   {
-#       "id":        "chunk_001",
-#       "text":      "RAG stands for Retrieval-Augmented Generation...",
-#       "embedding": [0.12, 0.44, -0.21, ...],
-#       "metadata":  {"file_name": "rag_notes.pdf", "page_number": 1, ...}
-#   }
-
+from functools import lru_cache
 import uuid
-import chromadb
-from chromadb.config import Settings as ChromaSettings
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance, VectorParams,
+    PointStruct,
+)
 
 from app.config import get_settings
 from app.core.document_loader import Document
 from app.core.embeddings import embed_batch, embed_query
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-COLLECTION_NAME = "rag_documents"
-
-# ── ChromaDB client (module-level singleton) ──────────────────────────────────
 _settings = get_settings()
-
-_client = chromadb.PersistentClient(
-    path=_settings.VECTOR_DB_PATH,
-    settings=ChromaSettings(anonymized_telemetry=False),
-)
+VECTOR_SIZE = 3072  # gemini-embedding-001 output dimension
 
 
-# ── Internal helper ───────────────────────────────────────────────────────────
-
-def _get_collection() -> chromadb.Collection:
-    """Return the collection, creating it if it doesn't exist yet."""
-    return _client.get_or_create_collection(
-        name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},   # cosine similarity for text search
+@lru_cache
+def _get_client() -> QdrantClient:
+    return QdrantClient(
+        url=_settings.QDRANT_URL,
+        api_key=_settings.QDRANT_API_KEY,
     )
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+def _collection_name(user_id: str) -> str:
+    return f"user_{user_id.replace('-', '_')}"
 
-def add_documents(documents: list[Document]) -> int:
-    """
-    Embed and store a list of document chunks in ChromaDB.
 
-    Each chunk gets a unique ID (UUID4). If a chunk with the same ID already
-    exists it will be skipped — use reset_collection() first for a full reload.
+def _ensure_collection(user_id: str) -> str:
+    client = _get_client()
+    name = _collection_name(user_id)
+    existing = [c.name for c in client.get_collections().collections]
+    if name not in existing:
+        client.create_collection(
+            collection_name=name,
+            vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
+        )
+    return name
 
-    Parameters
-    ----------
-    documents : list[Document]
-        Output of text_splitter.split_documents().
 
-    Returns
-    -------
-    int
-        Number of chunks successfully added.
-    """
+def add_documents(documents: list[Document], user_id: str) -> int:
     if not documents:
         return 0
 
-    collection = _get_collection()
+    client = _get_client()
+    name = _ensure_collection(user_id)
 
-    texts     = [doc["text"]     for doc in documents]
-    metadatas = [doc["metadata"] for doc in documents]
-    ids       = [str(uuid.uuid4()) for _ in documents]
-
-    # Embed all chunks in one pass
+    texts      = [doc["text"]     for doc in documents]
+    metadatas  = [doc["metadata"] for doc in documents]
     embeddings = embed_batch(texts)
 
-    collection.add(
-        ids=ids,
-        documents=texts,       # ChromaDB stores the raw text alongside the vector
-        embeddings=embeddings,
-        metadatas=metadatas,
-    )
+    points = [
+        PointStruct(
+            id=str(uuid.uuid4()),
+            vector=embedding,
+            payload={"text": text, **metadata},
+        )
+        for text, metadata, embedding in zip(texts, metadatas, embeddings)
+    ]
 
-    return len(ids)
+    client.upsert(collection_name=name, points=points)
+    return len(points)
 
 
-def search(query: str, top_k: int | None = None) -> list[dict]:
-    """
-    Find the most similar chunks to *query* using cosine similarity.
+def search(query: str, user_id: str, top_k: int | None = None) -> list[dict]:
+    top_k  = top_k or _settings.TOP_K_RESULTS
+    client = _get_client()
+    name   = _ensure_collection(user_id)
 
-    Parameters
-    ----------
-    query : str
-        The user's question or search string.
-    top_k : int | None
-        Number of results to return. Defaults to config TOP_K_RESULTS.
-
-    Returns
-    -------
-    list[dict]
-        Ranked list of results, each containing:
-        {
-            "text":     "...",
-            "metadata": {"file_name": "...", "page_number": N, ...},
-            "score":    0.87        # cosine similarity, higher = more relevant
-        }
-    """
-    top_k = top_k or _settings.TOP_K_RESULTS
-    collection = _get_collection()
-
-    # Guard: can't query an empty collection
-    if collection.count() == 0:
+    count = client.count(collection_name=name).count
+    if count == 0:
         return []
 
     query_vector = embed_query(query)
+    results = client.query_points(
+        collection_name=name,
+        query=query_vector,
+        limit=min(top_k, count),
+        with_payload=True,
+    ).points
 
-    results = collection.query(
-        query_embeddings=[query_vector],
-        n_results=min(top_k, collection.count()),  # can't ask for more than exists
-        include=["documents", "metadatas", "distances"],
-    )
-
-    # Unpack ChromaDB's nested response format into a clean flat list
     output = []
-    for text, metadata, distance in zip(
-        results["documents"][0],
-        results["metadatas"][0],
-        results["distances"][0],
-    ):
-        output.append(
-            {
-                "text":     text,
-                "metadata": metadata,
-                "score":    round(1 - distance, 4),  # convert distance → similarity
-            }
-        )
+    for hit in results:
+        payload = dict(hit.payload or {})
+        text = payload.pop("text", "")
+        output.append({
+            "text":     text,
+            "metadata": payload,
+            "score":    round(hit.score, 4),
+        })
 
     return output
 
 
-def get_collection_info() -> dict:
-    """
-    Return basic stats about the current collection.
-
-    Returns
-    -------
-    dict
-        {"collection_name": "...", "total_chunks": N}
-    """
-    collection = _get_collection()
-    return {
-        "collection_name": collection.name,
-        "total_chunks":    collection.count(),
-    }
+def get_collection_info(user_id: str) -> dict:
+    client = _get_client()
+    name   = _ensure_collection(user_id)
+    count  = client.count(collection_name=name).count
+    return {"collection_name": name, "total_chunks": count}
 
 
-def reset_collection() -> None:
-    """
-    Delete and recreate the collection, removing all stored chunks.
-
-    Use this when re-ingesting documents from scratch.
-    Safe to call even if the collection doesn't exist yet.
-    """
-    existing = [c.name for c in _client.list_collections()]
-    if COLLECTION_NAME in existing:
-        _client.delete_collection(name=COLLECTION_NAME)
-    _get_collection()   # recreates it immediately
+def reset_collection(user_id: str) -> None:
+    client = _get_client()
+    name   = _collection_name(user_id)
+    existing = [c.name for c in client.get_collections().collections]
+    if name in existing:
+        client.delete_collection(collection_name=name)
+    _ensure_collection(user_id)

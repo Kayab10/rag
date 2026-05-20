@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: rag-chatbot-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port 10000
+    envVars:
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: EMBEDDING_MODEL
+        value: models/gemini-embedding-001
+      - key: CHAT_MODEL
+        value: gemini-2.5-flash
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_EXPIRE_MINUTES
+        value: 1440
+      - key: CHUNK_SIZE
+        value: 800
+      - key: CHUNK_OVERLAP
+        value: 150
+      - key: TOP_K_RESULTS
+        value: 4
+      - key: CHAT_HISTORY_LIMIT
+        value: 10
