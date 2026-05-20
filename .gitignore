@@ -1,0 +1,58 @@
+
+.env
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials.json
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+.eggs/
+site/
+
+# ── Data — user uploads and generated DB files ────────────────────────────────
+data/chroma_db/
+data/raw/
+data/processed/
+
+# Keep the folder structure in git but not the contents
+!data/chroma_db/.gitkeep
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ── Jupyter notebooks (checkpoints) ───────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── OS generated files ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
