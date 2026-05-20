@@ -1,105 +1,309 @@
 # RAG Chatbot
 
-A production-ready conversational AI application that lets users upload their own documents and have intelligent, context-aware conversations about them. The system is built around the Retrieval-Augmented Generation (RAG) pattern, combining the reasoning power of Google Gemini with a persistent vector database to deliver accurate, grounded answers.
+A production-ready conversational AI application that lets users upload their own documents and have intelligent, context-aware conversations about them. Built on the Retrieval-Augmented Generation (RAG) pattern, it combines Google Gemini for both embeddings and generation with a persistent cloud vector database to deliver accurate, grounded answers — without hallucination.
+
 
 ---
 
-## What is this project?
+## ✨ Features
 
-Most AI chatbots either hallucinate facts or have no knowledge of your private documents. This application solves both problems. Users upload their own files — research papers, textbooks, syllabi, notes — and the system learns from them. When a user asks a question, the app finds the most relevant parts of their documents and gives them to Gemini as context, so the model can answer accurately without making things up.
-
-The key insight is that the model does not need to memorize your documents. Instead, it retrieves the relevant pieces at query time and reasons over them. This is what RAG means — Retrieval-Augmented Generation.
-
----
-
-## How it works
-
-When a user uploads a document, the system reads the text, breaks it into smaller overlapping pieces called chunks, and converts each chunk into a vector — a list of numbers that captures the meaning of that text. These vectors are stored in a cloud vector database called Qdrant, organized per user so that no one can access another user's documents.
-
-When a user asks a question, the system converts the question into a vector using the same embedding model, then searches the vector database for the chunks whose meaning is closest to the question. The top matching chunks are assembled into a prompt alongside the user's question and the recent conversation history, and sent to Gemini. Gemini reads the context and generates a detailed, conversational answer.
-
-The model is instructed to behave like a knowledgeable tutor — it uses the documents as its primary reference but draws on its own training knowledge to fill gaps, explain concepts in depth, and maintain a natural conversation. This means if you upload a syllabus that mentions linear algebra, the model can both tell you what your syllabus says about it and explain the subject in full detail.
+### 1. **User Authentication & Isolation**
+Secure, stateless identity management:
+- **Registration & Login**: Users register with a username and password. Passwords are hashed with bcrypt (with a unique random salt per user) and never stored in plain text.
+- **JWT Tokens**: After login, the server issues a signed JSON Web Token containing the user ID and expiry time. The client sends this token with every request; the server verifies the signature without a database lookup — keeping authentication stateless and fast.
+- **Complete Data Isolation**: Each user's documents and vectors are stored in a separate Qdrant collection. A query from one user can never return another user's document chunks.
 
 ---
 
-## Features
-
-**User authentication and isolation.** Every user registers with a username and password. Passwords are hashed with bcrypt and never stored in plain text. Authentication uses JWT tokens, which are short-lived signed credentials that prove identity without storing session state on the server. Each user's documents are stored in a completely separate Qdrant collection, so queries never return results from another user's files.
-
-**Document ingestion.** The system supports PDF, plain text, and Markdown files. PDFs are parsed page by page. Text is split using a recursive splitter that respects natural boundaries — it tries to break at paragraph breaks first, then line breaks, then sentence endings, and only falls back to character-level splitting as a last resort. This produces cleaner chunks that preserve meaning better than naive character-based splitting.
-
-**Duplicate detection.** Before ingesting a file, the system computes a SHA-256 hash of the file contents and checks whether that hash already exists in the user's document records. If it does, the upload is skipped immediately without re-embedding or re-storing anything. This prevents the vector database from accumulating duplicate chunks when the same file is uploaded multiple times.
-
-**Batched embedding.** Embedding is the process of converting text into vectors. The Gemini embedding model supports processing up to 100 texts in a single API call. The system takes advantage of this by batching all chunks from a document together, which is significantly faster than making one API call per chunk.
-
-**Persistent chat memory.** Every message in a conversation — both user questions and assistant answers — is saved to a Supabase PostgreSQL database. When a user logs in, their full conversation history is loaded and displayed. When they ask a new question, the last ten messages are included in the prompt so Gemini has context of the ongoing conversation. This means the model remembers what was discussed earlier in the session and can answer follow-up questions coherently.
-
-**Hybrid answering.** The prompt instructs Gemini to use the retrieved document chunks as its primary source but to supplement with its own knowledge when needed. This means the model will not refuse to explain a concept just because the exact explanation is not in the uploaded document. It behaves like a tutor who has read your materials and can also teach beyond them.
-
-**Path traversal protection.** File names submitted by users are sanitized before being used to save or delete files on disk. This prevents a malicious filename like `../../etc/passwd` from escaping the intended upload directory.
+### 2. **Document Ingestion Pipeline**
+Robust file processing from upload to vector store:
+- **Supported Formats**: PDF (parsed page by page), plain text (`.txt`), and Markdown (`.md`).
+- **Intelligent Text Splitting**: A recursive splitter that respects natural boundaries — paragraph breaks → line breaks → sentence endings → character-level as a last resort. This produces semantically cleaner chunks compared to naive fixed-size splitting.
+- **Duplicate Detection**: Before ingesting any file, the system computes a SHA-256 hash of the file contents and checks it against the user's existing document records in Supabase. If the file was already uploaded, the ingestion is skipped entirely — no redundant embeddings, no duplicate chunks in the vector store.
+- **Batched Embedding**: The Gemini embedding model supports up to 100 texts per API call. All chunks from a document are batched together in a single call, making ingestion significantly faster than one-chunk-at-a-time approaches.
+- **Path Traversal Protection**: File names submitted by users are sanitized before any disk operations. Malicious filenames like `../../etc/passwd` cannot escape the intended upload directory.
 
 ---
 
-## Technology choices and why
+### 3. **Retrieval & Generation (RAG Pipeline)**
+The core AI flow that drives every answer:
+- **Vector Search**: At query time, the user's question is converted to a 3072-dimensional vector using `gemini-embedding-001`. The system searches the user's Qdrant collection for the chunks with the highest cosine similarity to the question vector.
+- **Context Assembly**: The top matching chunks are assembled into a structured prompt alongside the user's question and the last 10 messages of conversation history.
+- **Hybrid Answering**: The system prompt instructs Gemini to use the retrieved document chunks as its primary reference but to supplement with its own training knowledge when needed. The model behaves like a tutor who has read your materials and can also teach beyond them — it will not refuse to explain a concept simply because the exact wording is not in the uploaded document.
+- **Generation Model**: `gemini-2.5-flash` handles all response generation.
 
-**FastAPI** was chosen for the backend because it is fast, has automatic API documentation, and integrates cleanly with Pydantic for request validation. It also supports async endpoints natively, which matters for file upload handling.
-
-**Streamlit** was chosen for the frontend because it lets you build a functional, interactive UI entirely in Python without writing any HTML, CSS, or JavaScript. For a project focused on backend and AI logic, this keeps the frontend simple and maintainable.
-
-**Google Gemini** is used for both embeddings and chat generation. Using a single provider for both simplifies the setup and ensures the embedding space and generation model are well-matched. The `gemini-embedding-001` model produces 3072-dimensional vectors, and `gemini-2.5-flash` handles generation.
-
-**Qdrant Cloud** is a purpose-built vector database that supports cosine similarity search efficiently. It was chosen over local alternatives like ChromaDB because it is a managed cloud service — data persists across server restarts, which is essential for deployment on platforms like Render where the local filesystem is ephemeral.
-
-**Supabase** provides a managed PostgreSQL database with a clean Python client. It stores user accounts, document metadata, and chat history. Like Qdrant, it is a cloud service that survives server restarts, making it suitable for production deployment.
-
-**bcrypt** is the industry standard for password hashing. It is deliberately slow, which makes brute-force attacks computationally expensive. Each password is hashed with a unique random salt, so identical passwords produce different hashes.
-
-**JWT (JSON Web Tokens)** are used for authentication. After login, the server issues a signed token containing the user's ID and an expiry time. The client sends this token with every request. The server verifies the signature without needing to look up a session in the database, which keeps authentication stateless and fast.
+**Use case**: Upload your university syllabus or a research paper and ask detailed questions about it. The model will cite your document and also explain underlying concepts in full.
 
 ---
 
-## Project structure
-
-The codebase is organized into layers, each with a single responsibility.
-
-The `core` layer contains pure RAG logic — document loading, text splitting, embedding, vector store operations, retrieval, prompt building, and pipeline orchestration. This layer knows nothing about users, HTTP, or authentication.
-
-The `auth` layer handles password hashing, JWT creation and verification, and the FastAPI dependency that extracts the current user from a request header.
-
-The `db` layer contains all database operations against Supabase — creating and fetching users, saving document records, and reading and writing chat history.
-
-The `services` layer sits between the API routes and the core/db layers. It contains the business logic — for example, checking for duplicate files before ingesting, loading chat history before running the pipeline, and saving messages after getting an answer.
-
-The `api` layer contains the FastAPI route handlers. Each route is thin — it validates the request, calls a service function, and returns the result. All the real logic lives in the service layer.
-
-The `models` layer contains Pydantic models that define the shape of API requests and responses. FastAPI uses these for automatic validation and documentation.
-
-The `frontend` directory contains the entire Streamlit application — login, registration, document management sidebar, and the chat interface.
+### 4. **Persistent Chat Memory**
+Conversations that survive page refreshes and re-logins:
+- Every user message and assistant reply is saved to Supabase PostgreSQL immediately after it is produced.
+- When a user logs in, their full conversation history is loaded and displayed in the Streamlit chat interface.
+- The last 10 messages are included in every new prompt, giving Gemini context of the ongoing session so it can answer follow-up questions coherently without the user repeating themselves.
 
 ---
 
-## Local setup
-
-You will need a Google Gemini API key, a Supabase project with the three tables created (users, documents, chat_history), and a Qdrant Cloud cluster. All three have free tiers sufficient for development and light production use.
-
-Copy `.env.example` to `.env` and fill in your API keys and URLs. The application reads all configuration from this file at startup — nothing is hardcoded.
-
-Start the FastAPI backend with `uvicorn app.main:app --reload` and the Streamlit frontend with `streamlit run frontend/streamlit_app.py` in separate terminals. The backend runs on port 8000 and the frontend on port 8501.
-
-The interactive API documentation is available at `http://localhost:8000/docs` while the backend is running. You can test every endpoint directly from the browser without needing a separate API client.
+### 5. **Frontend (Streamlit)**
+A clean, interactive chat UI built entirely in Python:
+- **Login & Registration screens** with form validation.
+- **Document management sidebar**: upload files, view uploaded documents, delete documents.
+- **Chat interface**: message history display, input box, streaming-style responses.
+- No HTML, CSS, or JavaScript required — the entire frontend is Python.
 
 ---
 
-## Deployment
+### 6. **Testing Suite**
+Five independent CLI test scripts, each verifiable without running the full app:
 
-The backend is designed to deploy on Render. A `render.yaml` file at the project root tells Render how to build and start the service. The only manual step is adding the secret environment variables (API keys) through the Render dashboard, since those should never be committed to the repository.
-
-The frontend deploys on Streamlit Cloud. After connecting the GitHub repository, you set the `API_BASE` secret to point at your Render backend URL. Streamlit Cloud reads this at runtime and the frontend automatically connects to the production backend instead of localhost.
-
-Both Qdrant and Supabase are external cloud services, so all data persists independently of the backend server. Render can restart or redeploy the backend without any data loss.
+| Script | What it tests | Requires API? |
+|--------|--------------|--------------|
+| Chunking test | Document loading and text splitting logic | No |
+| Retrieval test | Full embedding + Qdrant vector store pipeline | Yes |
+| Pipeline test | End-to-end RAG flow with real questions | Yes |
+| Database test | All Supabase operations (CRUD) | Yes |
+| Auth test | bcrypt hashing, JWT tokens, register/login endpoints | Yes |
 
 ---
 
-## Testing
+## 🚀 Quick Start
 
-The project includes five CLI test scripts that can be run independently to verify each layer of the system. The chunking test requires no API calls and verifies that documents load and split correctly. The retrieval test verifies the full embedding and vector store pipeline. The pipeline test runs end-to-end questions through the complete RAG flow. The database test verifies all Supabase operations. The auth test verifies password hashing, JWT tokens, and the register and login endpoints.
+### Prerequisites
+- Python 3.11+ (see `.python-version`)
+- A Google Gemini API key
+- A Qdrant Cloud cluster (free tier sufficient)
+- A Supabase project with three tables: `users`, `documents`, `chat_history`
+
+### Installation
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/Kayab10/rag.git
+   cd rag
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Configure environment variables:**
+   ```bash
+   cp .env.example .env
+   # Fill in your API keys and URLs in .env
+   ```
+
+### Required Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `GEMINI_API_KEY` | Google Gemini API key |
+| `QDRANT_URL` | Qdrant Cloud cluster URL |
+| `QDRANT_API_KEY` | Qdrant Cloud API key |
+| `SUPABASE_URL` | Supabase project URL |
+| `SUPABASE_KEY` | Supabase service role key |
+| `JWT_SECRET` | Secret string for signing JWT tokens |
+| `API_BASE` | Backend URL (set to `http://localhost:8000` locally) |
+
+### Running Locally
+
+Start the FastAPI backend:
+```bash
+uvicorn app.main:app --reload
+```
+
+In a separate terminal, start the Streamlit frontend:
+```bash
+streamlit run frontend/streamlit_app.py
+```
+
+- **Backend**: `http://localhost:8000`
+- **Frontend**: `http://localhost:8501`
+- **Interactive API docs**: `http://localhost:8000/docs`
+
+---
+
+## 📁 Project Structure
+
+```
+rag/
+├── app/
+│   ├── main.py                  # FastAPI app entry point, route registration
+│   ├── api/                     # Route handlers (thin layer — validate, call service, return)
+│   │   ├── auth.py              # /register, /login endpoints
+│   │   ├── documents.py         # /upload, /list, /delete endpoints
+│   │   └── chat.py              # /chat endpoint
+│   ├── core/                    # Pure RAG logic (no HTTP, no auth, no DB)
+│   │   ├── loader.py            # Document loading (PDF, TXT, MD)
+│   │   ├── splitter.py          # Recursive text chunking
+│   │   ├── embedder.py          # Gemini embedding, batched
+│   │   ├── vectorstore.py       # Qdrant collection management, upsert, search
+│   │   ├── retriever.py         # Query embedding + similarity search
+│   │   ├── prompt.py            # Prompt assembly (context + history + question)
+│   │   └── pipeline.py          # Orchestration: retriever → prompt → Gemini
+│   ├── auth/
+│   │   ├── hashing.py           # bcrypt password hash/verify
+│   │   ├── jwt.py               # JWT creation and verification
+│   │   └── dependencies.py      # FastAPI dependency: extract current user from header
+│   ├── db/
+│   │   ├── users.py             # Create user, fetch user by username
+│   │   ├── documents.py         # Save document record, check hash, list, delete
+│   │   └── chat.py              # Save message, load history
+│   ├── services/
+│   │   ├── ingest.py            # Dedup check → load → split → embed → store
+│   │   └── chat.py              # Load history → run pipeline → save messages
+│   └── models/
+│       ├── user.py              # RegisterRequest, LoginResponse Pydantic models
+│       ├── document.py          # UploadResponse, DocumentRecord models
+│       └── chat.py              # ChatRequest, ChatResponse models
+├── frontend/
+│   └── streamlit_app.py         # Complete Streamlit UI (login, upload, chat)
+├── tests/
+│   ├── test_chunking.py         # Chunking unit tests (no API)
+│   ├── test_retrieval.py        # Embedding + vector store integration tests
+│   ├── test_pipeline.py         # End-to-end RAG pipeline tests
+│   ├── test_db.py               # Supabase CRUD tests
+│   └── test_auth.py             # Auth flow tests (hash, JWT, endpoints)
+├── .streamlit/
+│   └── secrets.toml             # Streamlit Cloud secrets config
+├── .env.example                 # Environment variable template
+├── .python-version              # Python version pin (3.11)
+├── render.yaml                  # Render deployment config
+├── requirements.txt             # Python dependencies
+└── README.md                    # This file
+```
+
+### File Descriptions
+
+| File / Directory | Purpose |
+|-----------------|---------|
+| `app/core/` | Self-contained RAG logic. No knowledge of users, HTTP, or databases. Can be tested in isolation. |
+| `app/auth/` | Password hashing, JWT creation/verification, and the FastAPI dependency that extracts the current user from a request. |
+| `app/db/` | All Supabase operations: users table, documents table, chat_history table. |
+| `app/services/` | Business logic layer sitting between routes and core/db. Handles dedup, history loading, and message saving. |
+| `app/api/` | Thin FastAPI route handlers. Validate request → call service → return response. No business logic here. |
+| `app/models/` | Pydantic models for request/response validation and automatic API documentation. |
+| `frontend/streamlit_app.py` | The complete Streamlit UI in a single file: auth screens, sidebar document manager, chat interface. |
+| `render.yaml` | Declarative Render deployment config — tells Render the build command, start command, and runtime. |
+| `.python-version` | Pins the Python version for reproducibility across local and deployed environments. |
+
+---
+
+
+
+
+### Technology Stack
+
+| Component | Technology | Why |
+|-----------|-----------|-----|
+| **Backend API** | FastAPI 0.111 | Async support, automatic docs, Pydantic integration |
+| **Frontend** | Streamlit 1.35 | Full interactive UI in pure Python, no frontend stack needed |
+| **Embeddings** | `gemini-embedding-001` | 3072-dim vectors, batched up to 100 texts per call |
+| **Generation** | `gemini-2.5-flash` | Fast, capable, same provider as embeddings |
+| **Vector DB** | Qdrant Cloud 1.18 | Managed cloud, cosine similarity, per-user collections |
+| **Relational DB** | Supabase (PostgreSQL) | Managed cloud, stores users, docs, chat history |
+| **Password Hashing** | bcrypt 4.1 | Industry standard, salted, deliberately slow against brute force |
+| **Authentication** | PyJWT 2.8 | Stateless signed tokens, no server-side session storage |
+| **PDF Parsing** | pypdf 4.2 | Page-by-page text extraction |
+| **ASGI Server** | uvicorn 0.29 | High-performance async server for FastAPI |
+| **Deployment** | Render + Streamlit Cloud | Backend and frontend deployed independently |
+
+### Security Design
+
+| Concern | Implementation |
+|---------|---------------|
+| Password storage | bcrypt hash with unique salt per user; plain text never stored |
+| Session management | Stateless JWT with expiry; no server-side session table |
+| Data isolation | Separate Qdrant collection per user; queries cannot cross user boundaries |
+| File path safety | User-supplied filenames sanitized before disk operations; path traversal blocked |
+| Secret management | All keys in `.env` locally; Render dashboard / Streamlit secrets in production |
+
+---
+
+## 🔌 API Reference
+
+### Authentication
+
+#### `POST /register`
+Register a new user.
+```json
+Request:  { "username": "string", "password": "string" }
+Response: { "message": "User registered successfully" }
+```
+
+#### `POST /login`
+Login and receive a JWT token.
+```json
+Request:  { "username": "string", "password": "string" }
+Response: { "access_token": "string", "token_type": "bearer" }
+```
+
+---
+
+### Documents
+
+#### `POST /documents/upload`
+Upload and ingest a document. Requires `Authorization: Bearer <token>` header.
+```
+Request:  multipart/form-data with file field
+Response: { "filename": "string", "chunks": int, "status": "ingested" | "duplicate" }
+```
+
+#### `GET /documents/`
+List all documents uploaded by the authenticated user.
+```json
+Response: [ { "filename": "string", "uploaded_at": "datetime", "chunk_count": int } ]
+```
+
+#### `DELETE /documents/{filename}`
+Delete a document and remove its vectors from Qdrant.
+```json
+Response: { "message": "Document deleted" }
+```
+
+---
+
+### Chat
+
+#### `POST /chat`
+Send a message and receive a RAG-powered answer.
+```json
+Request:  { "message": "string" }
+Response: { "answer": "string", "sources": [ "chunk text snippets" ] }
+```
+
+---
+
+
+## 🌐 Deployment
+
+### Backend (Render)
+The `render.yaml` at the project root provides a declarative deployment config. After connecting the GitHub repository to Render:
+1. Render reads `render.yaml` and knows the build command, start command, and runtime.
+2. Add all secret environment variables through the Render dashboard (never commit these to the repo).
+3. Render deploys on every push to `main`.
+
+All data lives in Qdrant Cloud and Supabase — fully external to Render. The backend can restart, redeploy, or scale without any data loss.
+
+### Frontend (Streamlit Cloud)
+1. Connect the GitHub repository to Streamlit Cloud.
+2. Set `APP_API_BASE` as a secret pointing to the live Render backend URL.
+3. Streamlit Cloud reads this secret at runtime and the frontend connects to production automatically.
+
+### Ephemeral Filesystem Warning
+Render's local filesystem resets on every deploy. The choice of Qdrant Cloud and Supabase (rather than local ChromaDB or SQLite) was deliberate — all state persists in cloud services, making the backend fully stateless and safely restartable.
+
+
+
+
+---
+
+### Key Technologies:
+- **FastAPI**: Async Python web framework with automatic OpenAPI documentation
+- **Streamlit**: Interactive Python-native frontend framework
+- **Google Gemini**: Unified provider for both vector embeddings and text generation
+- **Qdrant**: Cloud-native vector database with cosine similarity search
+- **Supabase**: Managed PostgreSQL for users, documents, and chat history
+- **bcrypt + JWT**: Industry-standard authentication primitives
+
+---
